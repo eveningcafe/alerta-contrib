@@ -43,7 +43,7 @@ LOG = logging.getLogger(__name__)
 root = logging.getLogger()
 
 DEFAULT_OPTIONS = {
-    'config_file':   '~/.alerta.conf',
+    'config_file':   '/etc/alerta/alerta-triger.conf',
     'profile':       None,
     'endpoint':      'http://localhost:8080',
     'key':           '',
