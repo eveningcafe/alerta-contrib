@@ -30,6 +30,7 @@ DNS_RESOLVER_AVAILABLE = False
 
 try:
     import dns.resolver
+
     DNS_RESOLVER_AVAILABLE = True
 except:
     sys.stdout.write('Python dns.resolver unavailable. The skip_mta option will be forced to False')  # nopep8
@@ -39,41 +40,44 @@ try:
 except ImportError:
     import ConfigParser as configparser
 
-
 logging.basicConfig(level=logging.DEBUG)
 LOG = logging.getLogger(__name__)
 root = logging.getLogger()
 
 DEFAULT_OPTIONS = {
-    'config_file':   '/etc/alerta/alerta-triger.conf',
-    'profile':       None,
-    'endpoint':      'http://localhost:8080',
-    'key':           '',
-    'amqp_url':      'redis://localhost:6379/',
-    'amqp_topic':    'notify',
-    'amqp_queue_name':    '', # Name of the AMQP queue. Default is no name (default queue destination).
+    'config_file': '/etc/alerta/alerta-triger.conf',
+    'profile': None,
+    'endpoint': 'http://localhost:8080',
+    'key': '',
+    'amqp_url': 'redis://localhost:6379/',
+    'amqp_topic': 'notify',
+    'amqp_queue_name': '',  # Name of the AMQP queue. Default is no name (default queue destination).
     # if use mongo, it can be : mongodb://localhost:27017/kombu , kombu is db name
-    'amqp_queue_exclusive': True, # Exclusive queues may only be consumed by the current connection.
-    'smtp_host':     'smtp.gmail.com',
-    'smtp_port':     587,
-    'smtp_username': '', # application-specific username if it differs from the specified 'mail_from' user
+    'amqp_queue_exclusive': True,  # Exclusive queues may only be consumed by the current connection.
+    'smtp_host': 'smtp.gmail.com',
+    'smtp_port': 587,
+    'smtp_username': '',  # application-specific username if it differs from the specified 'mail_from' user
     'smtp_password': '',  # application-specific password if gmail used
     'smtp_starttls': False,  # use the STARTTLS SMTP extension
     'smtp_use_ssl': True,  # whether or not SSL is being used for the SMTP connection
-    'ssl_key_file': None, # a PEM formatted private key file for the SSL connection
-    'ssl_cert_file': None, # a certificate chain file for the SSL connection
-    'mail_from':     '',  # alerta@example.com
-    'mail_to':       [],  # devops@example.com, support@example.com
+    'ssl_key_file': None,  # a PEM formatted private key file for the SSL connection
+    'ssl_cert_file': None,  # a certificate chain file for the SSL connection
+    'mail_from': '',  # alerta@example.com
+    'mail_to': [],  # devops@example.com, support@example.com
     'mail_localhost': None,  # fqdn to use in the HELO/EHLO command
-    'mail_template':  os.path.dirname(__file__) + os.sep + 'email.tmpl',
+    'mail_template': os.path.dirname(__file__) + os.sep + 'email.tmpl',
     'mail_template_html': os.path.dirname(__file__) + os.sep + 'email.html.tmpl',  # nopep8
-    'mail_subject':  ('[{{ alert.status|capitalize }}] {{ alert.environment }}: '
-                      '{{ alert.severity|capitalize }} {{ alert.event }} on '
-                      '{{ alert.service|join(\',\') }} {{ alert.resource }}'),
+    'mail_subject': ('[{{ alert.status|capitalize }}] {{ alert.environment }}: '
+                     '{{ alert.severity|capitalize }} {{ alert.event }} on '
+                     '{{ alert.service|join(\',\') }} {{ alert.resource }}'),
     'dashboard_url': 'http://try.alerta.io',
-    'debug':         False,
-    'skip_mta':      False,
-    'email_type':    'text'  # options are: text, html
+    'debug': False,
+    'skip_mta': False,
+    'email_type': 'text',  # options are: text, html
+    # telegram
+    'telegram_url': 'https://api.telegram.org/bot',
+    'telegram_token': '',
+
 }
 
 OPTIONS = {}
@@ -121,7 +125,7 @@ class FanoutConsumer(ConsumerMixin):
             alert = Alert.parse(body)
             alertid = alert.get_id()
         except Exception as e:
-            LOG.warn(e)
+            LOG.warning(e)
             return
 
         if alert.repeat:
@@ -133,8 +137,8 @@ class FanoutConsumer(ConsumerMixin):
             return
 
         if (
-            alert.severity not in ['critical', 'major'] and
-            alert.previous_severity not in ['critical', 'major']
+                alert.severity not in ['critical', 'major'] and
+                alert.previous_severity not in ['critical', 'major']
         ):
             message.ack()
             return
@@ -186,7 +190,7 @@ class MailSender(threading.Thread):
                 except KeyError:
                     continue
                 if time.time() > hold_time:
-                    self.send_email(alert)
+                    self.diagnose(alert)
                     try:
                         del on_hold[alertid]
                     except KeyError:
@@ -194,7 +198,7 @@ class MailSender(threading.Thread):
 
             if keep_alive >= 10:
                 try:
-                    origin = '{}/{}'.format('alerta-mailer', OPTIONS['smtp_host'])
+                    origin = '{}/{}'.format('alerta-trigger', OPTIONS['smtp_host'])
                     api.heartbeat(origin, tags=[__version__])
                 except Exception as e:
                     time.sleep(5)
@@ -223,51 +227,57 @@ class MailSender(threading.Thread):
         LOG.warning('Field type is not supported')
         return False
 
-    def send_email(self, alert):
+    def _send_mail(self, mail_contacts):
+
+        return
+    def diagnose(self, alert):
         """Attempt to send an email for the provided alert, compiling
         the subject and text template and using all the other smtp settings
         that were specified in the configuration file
         """
-        contacts = list(OPTIONS['mail_to'])
-        LOG.debug('Initial mail contact list: %s', contacts)
+        mail_contacts = list()
+        telegram_contacts = list()
+
         if 'group_rules' in OPTIONS and len(OPTIONS['group_rules']) > 0:
             LOG.debug('Checking %d group rules' % len(OPTIONS['group_rules']))
             for rule in OPTIONS['group_rules']:
                 LOG.info('Evaluating rule %s', rule['name'])
-                is_matching = False
+                is_matching = True
                 for field in rule['fields']:
                     LOG.debug('Evaluating rule field %s', field)
                     value = getattr(alert, field['field'], None)
                     if value is None:
                         LOG.warning('Alert has no attribute %s',
                                     field['field'])
+                        is_matching = False
                         break
-                    if self._rule_matches(field['regex'], value):
-                        is_matching = True
-                    else:
+                    if self._rule_matches(field['regex'], value) == False:
+                        is_matching = False
                         break
                 if is_matching:
-                    # Add up any new contacts
-                    new_contacts = [x.strip() for x in rule['emails']
-                                    if x.strip() not in contacts]
-                    if len(new_contacts) > 0:
-                        if not rule.get('exclude', False):
-                            LOG.debug('Extending contact to include %s' % (
-                                new_contacts))
-                            contacts.extend(new_contacts)
-                        else:
-                            LOG.info('Clearing initial list of contacts and'
-                                     ' adding for this rule only')
-                            del contacts[:]
-                            contacts.extend(new_contacts)
-        
+                    # Add up any new contacts , send mail. telegram,...
+                    new_mail_contacts = [x.strip() for x in rule['mail']
+                                         if x.strip() not in mail_contacts]
+                    new_telegram_contacts = [x.strip() for x in rule['telegram']
+                                         if x.strip() not in telegram_contacts]
+                    if len(new_mail_contacts) > 0:
+                        LOG.debug('Extending mail contact to include %s' % (
+                            new_mail_contacts))
+                        mail_contacts.extend(new_mail_contacts)
+                    if len(new_telegram_contacts) > 0:
+                        LOG.debug('Extending telegram contact to include %s' % (
+                            new_telegram_contacts))
+                        telegram_contacts.extend(new_telegram_contacts)
+
         # Don't loose time (and try to send an email) if there is no contact...
-        if not contacts:
+        if not mail_contacts:
             return
+        else:
+            _send_mail(self, mail_contacts)
 
         template_vars = {
             'alert': alert,
-            'mail_to': contacts,
+            'mail_to': mail_contacts,
             'dashboard_url': OPTIONS['dashboard_url'],
             'program': os.path.basename(sys.argv[0]),
             'hostname': platform.uname()[1],
@@ -279,8 +289,8 @@ class MailSender(threading.Thread):
             self._template_name).render(**template_vars)
 
         if (
-            OPTIONS['email_type'] == 'html' and
-            self._template_name_html
+                OPTIONS['email_type'] == 'html' and
+                self._template_name_html
         ):
             html = self._template_env.get_template(
                 self._template_name_html).render(**template_vars)
@@ -290,7 +300,7 @@ class MailSender(threading.Thread):
         msg = MIMEMultipart('alternative')
         msg['Subject'] = Header(subject, 'utf-8').encode()
         msg['From'] = OPTIONS['mail_from']
-        msg['To'] = ", ".join(contacts)
+        msg['To'] = ", ".join(mail_contacts)
         msg.preamble = msg['Subject']
 
         # by default we are going to assume that the email is going to be text
@@ -301,16 +311,16 @@ class MailSender(threading.Thread):
             msg.attach(msg_html)
 
         try:
-            self._send_email_message(msg, contacts)
+            self._send_email_message(msg, mail_contacts)
             LOG.debug('%s : Email sent to %s' % (alert.get_id(),
-                                                 ','.join(contacts)))
-            return (msg, contacts)
+                                                 ','.join(mail_contacts)))
+            return (msg, mail_contacts)
         except (socket.error, socket.herror, socket.gaierror) as e:
             LOG.error('Mail server connection error: %s', e)
             return None
         except smtplib.SMTPException as e:
             LOG.error('Failed to send mail to %s on %s:%s : %s',
-                      ", ".join(contacts),
+                      ", ".join(mail_contacts),
                       OPTIONS['smtp_host'], OPTIONS['smtp_port'], e)
             return None
         except Exception as e:
@@ -327,14 +337,15 @@ class MailSender(threading.Thread):
                     if len(dns_answers) <= 0:
                         raise Exception('Failed to find mail exchange for {}'.format(dest))  # nopep8
 
-                    mxhost = reduce(lambda x, y: x if x.preference >= y.preference else y, dns_answers).exchange.to_text()  # nopep8
+                    mxhost = reduce(lambda x, y: x if x.preference >= y.preference else y,
+                                    dns_answers).exchange.to_text()  # nopep8
                     msg['To'] = dest
                     if OPTIONS['smtp_use_ssl']:
                         mx = smtplib.SMTP_SSL(mxhost,
-                                          OPTIONS['smtp_port'],
-                                          local_hostname=OPTIONS['mail_localhost'],
-                                          keyfile=OPTIONS['ssl_key_file'],
-                                          certfile=OPTIONS['ssl_cert_file'])
+                                              OPTIONS['smtp_port'],
+                                              local_hostname=OPTIONS['mail_localhost'],
+                                              keyfile=OPTIONS['ssl_key_file'],
+                                              certfile=OPTIONS['ssl_cert_file'])
                     else:
                         mx = smtplib.SMTP(mxhost,
                                           OPTIONS['smtp_port'],
@@ -350,10 +361,10 @@ class MailSender(threading.Thread):
         else:
             if OPTIONS['smtp_use_ssl']:
                 mx = smtplib.SMTP_SSL(OPTIONS['smtp_host'],
-                                  OPTIONS['smtp_port'],
-                                  local_hostname=OPTIONS['mail_localhost'],
-                                  keyfile=OPTIONS['ssl_key_file'],
-                                  certfile=OPTIONS['ssl_cert_file'])
+                                      OPTIONS['smtp_port'],
+                                      local_hostname=OPTIONS['mail_localhost'],
+                                      keyfile=OPTIONS['ssl_key_file'],
+                                      certfile=OPTIONS['ssl_cert_file'])
             else:
                 mx = smtplib.SMTP(OPTIONS['smtp_host'],
                                   OPTIONS['smtp_port'],
@@ -432,8 +443,10 @@ def parse_group_rules(config_file):
         return rules_d
     return ()
 
+
 def on_sigterm(x, y):
     raise SystemExit
+
 
 def main():
     global OPTIONS
@@ -501,6 +514,12 @@ def main():
         OPTIONS['group_rules'] = group_rules
 
     # Registering action for SIGTERM signal handling
+    # for key in OPTIONS.keys():
+    #     try:
+    #       for value in OPTIONS[key]:
+    #         print (key, value)
+    #     except:
+    #         print ("hello")
     signal.signal(signal.SIGTERM, on_sigterm)
 
     try:
@@ -527,6 +546,7 @@ def main():
         except Exception as e:
             print(str(e))
             sys.exit(1)
+
 
 if __name__ == '__main__':
     main()

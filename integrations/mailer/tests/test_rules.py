@@ -3,7 +3,7 @@ Unit test definitions for all rules
 '''
 import pytest
 import mailer
-from alertaclient.alert import AlertDocument
+from alertaclient.models.alert import Alert
 from mock import MagicMock, patch, DEFAULT
 
 
@@ -126,7 +126,7 @@ def test_rules_evaluation(alert_spec, input_rules, expected_contacts):
         mailer.OPTIONS['group_rules'] = input_rules
         mail_sender = mailer.MailSender()
         with patch.object(mail_sender, '_send_email_message') as _sem:
-            alert = AlertDocument.parse_alert(alert_spec)
+            alert = Alert.parse(alert_spec)
             _, emailed_contacts = mail_sender.send_email(alert)
             assert _sem.call_count == 1
             assert emailed_contacts == expected_contacts

@@ -45,6 +45,7 @@ settings apply to the mailer script.
 key = admin-key
 amqp_url = redis://localhost:6379/
 amqp_topic = notify
+hold_time = 30
 dashboard_url = http://localhost:8000
 endpoint = http://localhost:5000
 [mail]
@@ -56,12 +57,11 @@ smtp_use_ssl = True
 smtp_starttls = False
 debug = False
 skip_mta = False
-mail_to = john.doe@gmail.com,jane.doe@gmail.com
 mail_from = your.email@gmail.com
 email_type = text
 [telegram]
-url = "https://api.telegram.org/bot" # url requires no additional configuration.
-token = "abcdefghi:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+telegram_url = "https://api.telegram.org/bot" # url requires no additional configuration.
+telegram_token = "abcdefghi:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 [mail_alerta_users]
 # send mail to alerta user
 [mail_alerta_groups]
