@@ -1,0 +1,11 @@
+[
+    {
+        "name": "kafka",
+        "fields": [
+            {"field": "resource", "regex": "kafka_cluster"},
+            {"field": "environment", "regex": "Code"}
+        ],
+        "mail": ["hoanq13@viettel.com.vn"],
+        "telegram": ["-325641869"]
+   }
+]

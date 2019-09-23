@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import platform
+import telepot
 import re
 import signal
 import smtplib
@@ -18,6 +19,7 @@ from email.mime.text import MIMEText
 from functools import reduce
 
 import jinja2
+from jinja2 import Template, UndefinedError
 from alertaclient.api import Client
 from alertaclient.models.alert import Alert
 from kombu import Connection, Exchange, Queue
@@ -87,6 +89,16 @@ HOLD_TIME = 30
 
 on_hold = dict()
 
+DEFAULT_TMPL = """
+{% if customer %}Customer: `{{customer}}` {% endif %}
+
+*[{{ status.capitalize() }}] {{ environment }} {{ severity.capitalize() }}*
+{{ event | replace("_","\_") }} {{ resource.capitalize() }}
+
+```
+{{ text }}
+```
+"""
 
 class FanoutConsumer(ConsumerMixin):
 
@@ -158,7 +170,7 @@ class FanoutConsumer(ConsumerMixin):
             message.ack()
 
 
-class MailSender(threading.Thread):
+class Trigger(threading.Thread):
 
     def __init__(self):
 
@@ -176,7 +188,7 @@ class MailSender(threading.Thread):
             self._template_name_html = os.path.basename(
                 OPTIONS['mail_template_html'])
 
-        super(MailSender, self).__init__()
+        super(Trigger, self).__init__()
 
     def run(self):
 
@@ -227,54 +239,7 @@ class MailSender(threading.Thread):
         LOG.warning('Field type is not supported')
         return False
 
-    def _send_mail(self, mail_contacts):
-
-        return
-    def diagnose(self, alert):
-        """Attempt to send an email for the provided alert, compiling
-        the subject and text template and using all the other smtp settings
-        that were specified in the configuration file
-        """
-        mail_contacts = list()
-        telegram_contacts = list()
-
-        if 'group_rules' in OPTIONS and len(OPTIONS['group_rules']) > 0:
-            LOG.debug('Checking %d group rules' % len(OPTIONS['group_rules']))
-            for rule in OPTIONS['group_rules']:
-                LOG.info('Evaluating rule %s', rule['name'])
-                is_matching = True
-                for field in rule['fields']:
-                    LOG.debug('Evaluating rule field %s', field)
-                    value = getattr(alert, field['field'], None)
-                    if value is None:
-                        LOG.warning('Alert has no attribute %s',
-                                    field['field'])
-                        is_matching = False
-                        break
-                    if self._rule_matches(field['regex'], value) == False:
-                        is_matching = False
-                        break
-                if is_matching:
-                    # Add up any new contacts , send mail. telegram,...
-                    new_mail_contacts = [x.strip() for x in rule['mail']
-                                         if x.strip() not in mail_contacts]
-                    new_telegram_contacts = [x.strip() for x in rule['telegram']
-                                         if x.strip() not in telegram_contacts]
-                    if len(new_mail_contacts) > 0:
-                        LOG.debug('Extending mail contact to include %s' % (
-                            new_mail_contacts))
-                        mail_contacts.extend(new_mail_contacts)
-                    if len(new_telegram_contacts) > 0:
-                        LOG.debug('Extending telegram contact to include %s' % (
-                            new_telegram_contacts))
-                        telegram_contacts.extend(new_telegram_contacts)
-
-        # Don't loose time (and try to send an email) if there is no contact...
-        if not mail_contacts:
-            return
-        else:
-            _send_mail(self, mail_contacts)
-
+    def _send_mail(self, mail_contacts , alert):
         template_vars = {
             'alert': alert,
             'mail_to': mail_contacts,
@@ -327,6 +292,53 @@ class MailSender(threading.Thread):
             LOG.error('Unexpected error while sending email: {}'.format(str(e)))  # nopep8
             return None
 
+    def diagnose(self, alert):
+        """Attempt to send an email for the provided alert, compiling
+        the subject and text template and using all the other smtp settings
+        that were specified in the configuration file
+        """
+        mail_contacts = list()
+        telegram_contacts = list()
+
+        if 'group_rules' in OPTIONS and len(OPTIONS['group_rules']) > 0:
+            LOG.debug('Checking %d group rules' % len(OPTIONS['group_rules']))
+            for rule in OPTIONS['group_rules']:
+                LOG.info('Evaluating rule %s', rule['name'])
+                is_matching = True
+                for field in rule['fields']:
+                    LOG.debug('Evaluating rule field %s', field)
+                    value = getattr(alert, field['field'], None)
+                    if value is None:
+                        LOG.warning('Alert has no attribute %s',
+                                    field['field'])
+                        is_matching = False
+                        break
+                    if self._rule_matches(field['regex'], value) == False:
+                        is_matching = False
+                        break
+                if is_matching:
+                    # Add up any new contacts , send mail. telegram,...
+                    if 'mail' in rule:
+                        new_mail_contacts = [x.strip() for x in rule['mail']
+                                             if x.strip() not in mail_contacts]
+                        if len(new_mail_contacts) > 0:
+                            LOG.debug('Extending mail contact to include %s' % (
+                                new_mail_contacts))
+                            mail_contacts.extend(new_mail_contacts)
+                    if 'telegram' in rule:
+                        new_telegram_contacts = [x.strip() for x in rule['telegram']
+                                                 if x.strip() not in telegram_contacts]
+                        if len(new_telegram_contacts) > 0:
+                            LOG.debug('Extending telegram contact to include %s' % (
+                                new_telegram_contacts))
+                            telegram_contacts.extend(new_telegram_contacts)
+
+        # Don't loose time (and try to send ) if there is no contact...
+        if len(mail_contacts) > 0:
+            self._send_mail(mail_contacts, alert)
+        if len(telegram_contacts) > 0:
+            self._send_telegram(telegram_contacts, alert)
+            
     def _send_email_message(self, msg, contacts):
         if OPTIONS['skip_mta'] and DNS_RESOLVER_AVAILABLE:
             for dest in contacts:
@@ -384,6 +396,62 @@ class MailSender(threading.Thread):
                         contacts,
                         msg.as_string())
             mx.close()
+
+    def _send_telegram(self, telegram_contacts, alert):
+        if 'telegram_proxy_address' in OPTIONS and 'telegram_proxy_username' in OPTIONS and 'telegram_proxy_password' in OPTIONS:
+            telepot.api.set_proxy(
+        OPTIONS['telegram_proxy_address'], (OPTIONS['telegram_proxy_username'], OPTIONS['telegram_proxy_password']))
+            LOG.debug('Telegram: using proxy %s', OPTIONS['telegram_proxy_address'])
+        elif  'telegram_proxy_address' in OPTIONS :
+            telepot.api.set_proxy(OPTIONS['telegram_proxy_address'])
+            LOG.debug('Telegram: using proxy %s', OPTIONS['telegram_proxy_address'])
+
+        bot = telepot.Bot(OPTIONS['telegram_token'])
+        LOG.debug('Telegram: %s', bot.getMe())
+
+        if OPTIONS['telegram_template']:
+            if os.path.exists(OPTIONS['telegram_template']):
+                with open(OPTIONS['telegram_template'], 'r') as f:
+                    template = Template(f.read())
+            else:
+                template = Template(OPTIONS['telegram_template'])
+        else:
+            template = Template(DEFAULT_TMPL)
+        try:
+            text = template.render(alert.__dict__)
+        except UndefinedError:
+            text = "Something bad has happened but also we " \
+                   "can't handle your telegram template message."
+        LOG.debug('Telegram: message=%s', text)
+
+        keyboard = {
+            'inline_keyboard': [
+                [
+                    {'text': 'ack', 'callback_data': '/ack ' + alert.id},
+                    {'text': 'close', 'callback_data': '/close ' + alert.id},
+                    {'text': 'blackout',
+                     'callback_data': '/blackout %s|%s|%s' % (alert.environment,
+                                                              alert.resource,
+                                                              alert.event)}
+                ]
+            ]
+        }
+        for chartid in telegram_contacts:
+            try:
+                response = self.bot.sendMessage(chartid,
+                                                text,
+                                                parse_mode='Markdown',
+                                                disable_notification=False,
+                                                reply_markup=keyboard)
+            except telepot.exception.TelegramError as e:
+                raise RuntimeError("Telegram: ERROR - %s, description= %s, json=%s",
+                                   e.error_code,
+                                   e.description,
+                                   e.json)
+            except Exception as e:
+                raise RuntimeError("Telegram: ERROR - %s", e)
+
+            LOG.debug('Telegram: %s', response)
 
 
 def validate_rules(rules):
@@ -451,7 +519,8 @@ def on_sigterm(x, y):
 def main():
     global OPTIONS
 
-    CONFIG_SECTION = 'alerta-mailer'
+    MAIL_CONFIG_SECTION = 'mail'
+    TELEGRAM_CONFIG_SECTION = 'telegram'
     config_file = os.environ.get('ALERTA_CONF_FILE') or DEFAULT_OPTIONS['config_file']  # nopep8
 
     # Convert default booleans to its string type, otherwise config.getboolean fails  # nopep8
@@ -479,21 +548,30 @@ def main():
         LOG.warning("Problem reading configuration file %s - is this an ini file?", config_file)  # nopep8
         sys.exit(1)
 
-    if config.has_section(CONFIG_SECTION):
-        NoneType = type(None)
-        config_getters = {
-            NoneType: config.get,
-            str: config.get,
-            int: config.getint,
-            float: config.getfloat,
-            bool: config.getboolean,
-            list: lambda s, o: [e.strip() for e in config.get(s, o).split(',')] if len(config.get(s, o)) else []
-        }
+    NoneType = type(None)
+    config_getters = {
+        NoneType: config.get,
+        str: config.get,
+        int: config.getint,
+        float: config.getfloat,
+        bool: config.getboolean,
+        list: lambda s, o: [e.strip() for e in config.get(s, o).split(',')] if len(config.get(s, o)) else []
+    }
+
+    if config.has_section(MAIL_CONFIG_SECTION):
         for opt in DEFAULT_OPTIONS:
             # Convert the options to the expected type
-            OPTIONS[opt] = config_getters[type(DEFAULT_OPTIONS[opt])](CONFIG_SECTION, opt)  # nopep8
+            OPTIONS[opt] = config_getters[type(DEFAULT_OPTIONS[opt])](MAIL_CONFIG_SECTION, opt)  # nopep8
     else:
-        sys.stderr.write('Alerta configuration section not found in configuration file\n')  # nopep8
+        LOG.debug('Alerta mail configuration section not found in configuration file\n')  # nopep8
+        OPTIONS = defopts.copy()
+
+    if config.has_section(TELEGRAM_CONFIG_SECTION):
+        for opt in DEFAULT_OPTIONS:
+            # Convert the options to the expected type
+            OPTIONS[opt] = config_getters[type(DEFAULT_OPTIONS[opt])](TELEGRAM_CONFIG_SECTION, opt)  # nopep8
+    else:
+        LOG.debug('Alerta telegram configuration section not found in configuration file\n')  # nopep8
         OPTIONS = defopts.copy()
 
     OPTIONS['endpoint'] = os.environ.get('ALERTA_ENDPOINT') or OPTIONS['endpoint']  # nopep8
@@ -523,8 +601,8 @@ def main():
     signal.signal(signal.SIGTERM, on_sigterm)
 
     try:
-        mailer = MailSender()
-        mailer.start()
+        trigger = Trigger()
+        trigger.start()
     except (SystemExit, KeyboardInterrupt):
         sys.exit(0)
     except Exception as e:
@@ -540,8 +618,8 @@ def main():
             consumer = FanoutConsumer(connection=conn)
             consumer.run()
         except (SystemExit, KeyboardInterrupt):
-            mailer.should_stop = True
-            mailer.join()
+            trigger.should_stop = True
+            trigger.join()
             sys.exit(0)
         except Exception as e:
             print(str(e))

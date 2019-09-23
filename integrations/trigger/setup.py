@@ -20,6 +20,7 @@ setuptools.setup(
         'alerta>=5.0.2',
         'kombu',
         'redis',
+        'telepot',
         'jinja2'
     ],
     include_package_data=True,
