@@ -2,7 +2,7 @@
 Unit test definitions for all rules
 '''
 import pytest
-import mailer
+import trigger
 from alertaclient.models.alert import Alert
 from mock import MagicMock, patch, DEFAULT
 
@@ -13,7 +13,7 @@ def test_rules_dont_exist():
     '''
     with patch('mailer.os') as system_os:
         system_os.path.exists.return_value = False
-        res = mailer.parse_group_rules('config_file')
+        res = trigger.parse_group_rules('config_file')
         system_os.path.exists.called_once_with('confile_file')
         assert res is None
 
@@ -21,7 +21,7 @@ def test_rules_parsing_indev():
     '''
     Test the rules file is properly read
     '''
-    with patch.multiple(mailer, os=DEFAULT, open=DEFAULT,
+    with patch.multiple(trigger, os=DEFAULT, open=DEFAULT,
                         json=DEFAULT, validate_rules=DEFAULT) as mocks:
         mocks['os'].path.exists.return_value = True
         mocks['os'].walk().__iter__\
@@ -35,18 +35,25 @@ def test_rules_parsing_indev():
 
         mocks['json'].load.side_effect = [TypeError, doc]
         mocks['validate_rules'].return_value = doc
-        res = mailer.parse_group_rules('config_file')
+        res = trigger.parse_group_rules('config_file')
 
         # Assert that we checked for folder existence
         mocks['os'].path.exists.called_once_with('confile_file')
         # Check that validation was called for valid file
         mocks['validate_rules'].assert_called_once_with(doc)
+def test_telegram():
+    with patch.dict(trigger.TELEGRAM_OPTIONS, trigger.DEFAULT_TELEGRAM_OPTIONS):
+        t = trigger.Trigger()
+        t._send_telegram('iasasdf', 'fasd')
+        print("cho")
+
+
 
 def test_rules_parsing():
     '''
     Test the rules file is properly read
     '''
-    with patch.multiple(mailer, os=DEFAULT, open=DEFAULT,
+    with patch.multiple(trigger, os=DEFAULT, open=DEFAULT,
                         json=DEFAULT, validate_rules=DEFAULT) as mocks:
         mocks['os'].path.exists.return_value = True
         mocks['os'].walk().__iter__\
@@ -58,7 +65,7 @@ def test_rules_parsing():
         doc = [{'notify': {'fields': []}}]
         mocks['json'].load.side_effect = [TypeError, doc]
         mocks['validate_rules'].return_value = doc
-        res = mailer.parse_group_rules('config_file')
+        res = trigger.parse_group_rules('config_file')
 
         # Assert that we checked for folder existence
         mocks['os'].path.exists.called_once_with('confile_file')
@@ -122,7 +129,7 @@ def test_rules_validation(doc, is_valid):
     '''
     Test rule validation
     '''
-    res = mailer.validate_rules(doc)
+    res = trigger.validate_rules(doc)
     if is_valid:
         assert res is not None and res == doc
     else:
@@ -145,10 +152,10 @@ def test_rules_evaluation(alert_spec, input_rules, expected_contacts):
     '''
     Test that rules are properly evaluated
     '''
-    with patch.dict(mailer.OPTIONS, mailer.DEFAULT_OPTIONS):
-        mailer.OPTIONS['mail_to'] = []
-        mailer.OPTIONS['group_rules'] = input_rules
-        mail_sender = mailer.MailSender()
+    with patch.dict(trigger.OPTIONS, trigger.DEFAULT_OPTIONS):
+        trigger.OPTIONS['mail_to'] = []
+        trigger.OPTIONS['group_rules'] = input_rules
+        mail_sender = trigger.MailSender()
         with patch.object(mail_sender, '_send_email_message') as _sem:
             alert = Alert.parse(alert_spec)
             _, emailed_contacts = mail_sender.send_email(alert)
@@ -162,9 +169,9 @@ def test_rule_matches_list():
     for a list
     '''
     # Mock options to instantiate mailer
-    with patch.dict(mailer.OPTIONS, mailer.DEFAULT_OPTIONS):
-        mail_sender = mailer.MailSender()
-        with patch.object(mailer, 're') as regex:
+    with patch.dict(trigger.OPTIONS, trigger.DEFAULT_OPTIONS):
+        mail_sender = trigger.Trigger()
+        with patch.object(trigger, 're') as regex:
             regex.match.side_effect = [MagicMock(), None]
             assert mail_sender._rule_matches('regex', ['item1']) is True
             regex.match.assert_called_with('regex', 'item1')
@@ -178,9 +185,9 @@ def test_rule_matches_string():
     for a string
     '''
     # Mock options to instantiate mailer
-    with patch.dict(mailer.OPTIONS, mailer.DEFAULT_OPTIONS):
-        mail_sender = mailer.MailSender()
-        with patch.object(mailer, 're') as regex:
+    with patch.dict(trigger.OPTIONS, trigger.DEFAULT_OPTIONS):
+        mail_sender = trigger.MailSender()
+        with patch.object(trigger, 're') as regex:
             regex.search.side_effect = [MagicMock(), None]
             assert mail_sender._rule_matches('regex', 'value1') is True
             regex.search.assert_called_with('regex', 'value1')

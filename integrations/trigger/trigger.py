@@ -50,12 +50,18 @@ DEFAULT_OPTIONS = {
     'config_file': '/etc/alerta/alerta-triger.conf',
     'profile': None,
     'endpoint': 'http://localhost:8080',
+    'dashboard_url': 'http://try.alerta.io',
     'key': '',
     'amqp_url': 'redis://localhost:6379/',
     'amqp_topic': 'notify',
+    'debug': False,
     'amqp_queue_name': '',  # Name of the AMQP queue. Default is no name (default queue destination).
     # if use mongo, it can be : mongodb://localhost:27017/kombu , kombu is db name
     'amqp_queue_exclusive': True,  # Exclusive queues may only be consumed by the current connection.
+    'hold_time': 30,  # time keep messeage in queue before decide it is flapping
+}
+
+DEFAULT_MAIL_OPTIONS = {
     'smtp_host': 'smtp.gmail.com',
     'smtp_port': 587,
     'smtp_username': '',  # application-specific username if it differs from the specified 'mail_from' user
@@ -72,20 +78,24 @@ DEFAULT_OPTIONS = {
     'mail_subject': ('[{{ alert.status|capitalize }}] {{ alert.environment }}: '
                      '{{ alert.severity|capitalize }} {{ alert.event }} on '
                      '{{ alert.service|join(\',\') }} {{ alert.resource }}'),
-    'dashboard_url': 'http://try.alerta.io',
-    'debug': False,
+
     'skip_mta': False,
     'email_type': 'text',  # options are: text, html
+}
+DEFAULT_TELEGRAM_OPTIONS = {
     # telegram
     'telegram_url': 'https://api.telegram.org/bot',
     'telegram_token': '',
+    'telegram_proxy_address': None,
+    'telegram_proxy_username': None,
+    'telegram_proxy_password': None,
 
 }
-
 OPTIONS = {}
-
+MAIL_OPTIONS = {}
+TELEGRAM_OPTIONS = {}
 # seconds (hold alert until sending, delete if cleared before end of hold time)
-HOLD_TIME = 30
+# HOLD_TIME = 30
 
 on_hold = dict()
 
@@ -100,10 +110,11 @@ DEFAULT_TMPL = """
 ```
 """
 
+
 class FanoutConsumer(ConsumerMixin):
 
-    def __init__(self, connection):
-
+    def __init__(self, connection, hold_time):
+        self.hold_time = hold_time
         self.connection = connection
         self.channel = self.connection.channel()
 
@@ -163,10 +174,10 @@ class FanoutConsumer(ConsumerMixin):
                     pass
                 message.ack()
             else:
-                on_hold[alertid] = (alert, time.time() + HOLD_TIME)
+                on_hold[alertid] = (alert, time.time() + self.hold_time)
                 message.ack()
         else:
-            on_hold[alertid] = (alert, time.time() + HOLD_TIME)
+            on_hold[alertid] = (alert, time.time() + self.hold_time)
             message.ack()
 
 
@@ -176,17 +187,17 @@ class Trigger(threading.Thread):
 
         self.should_stop = False
         self._template_dir = os.path.dirname(
-            os.path.realpath(OPTIONS['mail_template']))
-        self._template_name = os.path.basename(OPTIONS['mail_template'])
-        self._subject_template = jinja2.Template(OPTIONS['mail_subject'])
+            os.path.realpath(MAIL_OPTIONS['mail_template']))
+        self._template_name = os.path.basename(MAIL_OPTIONS['mail_template'])
+        self._subject_template = jinja2.Template(MAIL_OPTIONS['mail_subject'])
         self._template_env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(self._template_dir),
             extensions=['jinja2.ext.autoescape'],
             autoescape=True
         )
-        if OPTIONS['mail_template_html']:
+        if MAIL_OPTIONS['mail_template_html']:
             self._template_name_html = os.path.basename(
-                OPTIONS['mail_template_html'])
+                MAIL_OPTIONS['mail_template_html'])
 
         super(Trigger, self).__init__()
 
@@ -239,7 +250,7 @@ class Trigger(threading.Thread):
         LOG.warning('Field type is not supported')
         return False
 
-    def _send_mail(self, mail_contacts , alert):
+    def _send_mail(self, mail_contacts, alert):
         template_vars = {
             'alert': alert,
             'mail_to': mail_contacts,
@@ -254,7 +265,7 @@ class Trigger(threading.Thread):
             self._template_name).render(**template_vars)
 
         if (
-                OPTIONS['email_type'] == 'html' and
+                MAIL_OPTIONS['email_type'] == 'html' and
                 self._template_name_html
         ):
             html = self._template_env.get_template(
@@ -264,7 +275,7 @@ class Trigger(threading.Thread):
 
         msg = MIMEMultipart('alternative')
         msg['Subject'] = Header(subject, 'utf-8').encode()
-        msg['From'] = OPTIONS['mail_from']
+        msg['From'] = MAIL_OPTIONS['mail_from']
         msg['To'] = ", ".join(mail_contacts)
         msg.preamble = msg['Subject']
 
@@ -338,9 +349,9 @@ class Trigger(threading.Thread):
             self._send_mail(mail_contacts, alert)
         if len(telegram_contacts) > 0:
             self._send_telegram(telegram_contacts, alert)
-            
+
     def _send_email_message(self, msg, contacts):
-        if OPTIONS['skip_mta'] and DNS_RESOLVER_AVAILABLE:
+        if MAIL_OPTIONS['skip_mta'] and DNS_RESOLVER_AVAILABLE:
             for dest in contacts:
                 try:
                     (_, ehost) = dest.split('@')
@@ -352,69 +363,73 @@ class Trigger(threading.Thread):
                     mxhost = reduce(lambda x, y: x if x.preference >= y.preference else y,
                                     dns_answers).exchange.to_text()  # nopep8
                     msg['To'] = dest
-                    if OPTIONS['smtp_use_ssl']:
+                    if MAIL_OPTIONS['smtp_use_ssl']:
                         mx = smtplib.SMTP_SSL(mxhost,
-                                              OPTIONS['smtp_port'],
-                                              local_hostname=OPTIONS['mail_localhost'],
-                                              keyfile=OPTIONS['ssl_key_file'],
+                                              MAIL_OPTIONS['smtp_port'],
+                                              local_hostname=MAIL_OPTIONS['mail_localhost'],
+                                              keyfile=MAIL_OPTIONS['ssl_key_file'],
                                               certfile=OPTIONS['ssl_cert_file'])
                     else:
                         mx = smtplib.SMTP(mxhost,
-                                          OPTIONS['smtp_port'],
-                                          local_hostname=OPTIONS['mail_localhost'])
-                    if OPTIONS['debug']:
+                                          MAIL_OPTIONS['smtp_port'],
+                                          local_hostname=MAIL_OPTIONS['mail_localhost'])
+                    if MAIL_OPTIONS['debug']:
                         mx.set_debuglevel(True)
-                    mx.sendmail(OPTIONS['mail_from'], dest, msg.as_string())
+                    mx.sendmail(MAIL_OPTIONS['mail_from'], dest, msg.as_string())
                     mx.close()
                     LOG.debug('Sent notification email to {} (mta={})'.format(dest, mxhost))  # nopep8
                 except Exception as e:
                     LOG.error('Failed to send email to address {} (mta={}): {}'.format(dest, mxhost, str(e)))  # nopep8
 
         else:
-            if OPTIONS['smtp_use_ssl']:
-                mx = smtplib.SMTP_SSL(OPTIONS['smtp_host'],
-                                      OPTIONS['smtp_port'],
-                                      local_hostname=OPTIONS['mail_localhost'],
-                                      keyfile=OPTIONS['ssl_key_file'],
-                                      certfile=OPTIONS['ssl_cert_file'])
+            if MAIL_OPTIONS['smtp_use_ssl']:
+                # print(MAIL_OPTIONS['smtp_host'])
+                mx = smtplib.SMTP_SSL(MAIL_OPTIONS['smtp_host'],
+                                      MAIL_OPTIONS['smtp_port'],
+                                      local_hostname=MAIL_OPTIONS['mail_localhost'],
+                                      keyfile=MAIL_OPTIONS['ssl_key_file'],
+                                      certfile=MAIL_OPTIONS['ssl_cert_file'])
             else:
-                mx = smtplib.SMTP(OPTIONS['smtp_host'],
-                                  OPTIONS['smtp_port'],
-                                  local_hostname=OPTIONS['mail_localhost'])
+                mx = smtplib.SMTP(MAIL_OPTIONS['smtp_host'],
+                                  MAIL_OPTIONS['smtp_port'],
+                                  local_hostname=MAIL_OPTIONS['mail_localhost'])
             if OPTIONS['debug']:
                 mx.set_debuglevel(True)
 
             mx.ehlo()
 
-            if OPTIONS['smtp_starttls']:
+            if MAIL_OPTIONS['smtp_starttls']:
                 mx.starttls()
 
-            if OPTIONS['smtp_password']:
-                mx.login(OPTIONS['smtp_username'], OPTIONS['smtp_password'])
+            if MAIL_OPTIONS['smtp_password']:
+                mx.login(MAIL_OPTIONS['smtp_username'], MAIL_OPTIONS['smtp_password'])
 
-            mx.sendmail(OPTIONS['mail_from'],
+            mx.sendmail(MAIL_OPTIONS['mail_from'],
                         contacts,
                         msg.as_string())
             mx.close()
 
     def _send_telegram(self, telegram_contacts, alert):
-        if 'telegram_proxy_address' in OPTIONS and 'telegram_proxy_username' in OPTIONS and 'telegram_proxy_password' in OPTIONS:
-            telepot.api.set_proxy(
-        OPTIONS['telegram_proxy_address'], (OPTIONS['telegram_proxy_username'], OPTIONS['telegram_proxy_password']))
-            LOG.debug('Telegram: using proxy %s', OPTIONS['telegram_proxy_address'])
-        elif  'telegram_proxy_address' in OPTIONS :
-            telepot.api.set_proxy(OPTIONS['telegram_proxy_address'])
-            LOG.debug('Telegram: using proxy %s', OPTIONS['telegram_proxy_address'])
+        if 'telegram_proxy_address' in TELEGRAM_OPTIONS :
+                if TELEGRAM_OPTIONS['telegram_proxy_username'] is not None and TELEGRAM_OPTIONS['telegram_proxy_password'] is not None:
+                    telepot.api.set_proxy(
+                        TELEGRAM_OPTIONS['telegram_proxy_address'],
+                        (TELEGRAM_OPTIONS['telegram_proxy_username'], TELEGRAM_OPTIONS['telegram_proxy_password']))
+                    LOG.debug('Telegram: using proxy %s', TELEGRAM_OPTIONS['telegram_proxy_address'])
+                elif 'telegram_proxy_address' in TELEGRAM_OPTIONS:
+                    telepot.api.set_proxy(TELEGRAM_OPTIONS['telegram_proxy_address'])
+                    LOG.debug('Telegram: using proxy %s', TELEGRAM_OPTIONS['telegram_proxy_address'])
 
-        bot = telepot.Bot(OPTIONS['telegram_token'])
+
+        bot = telepot.Bot(TELEGRAM_OPTIONS['telegram_token'])
         LOG.debug('Telegram: %s', bot.getMe())
 
-        if OPTIONS['telegram_template']:
-            if os.path.exists(OPTIONS['telegram_template']):
-                with open(OPTIONS['telegram_template'], 'r') as f:
+        if TELEGRAM_OPTIONS['telegram_template']:
+            if os.path.exists(TELEGRAM_OPTIONS['telegram_template']):
+                with open(TELEGRAM_OPTIONS['telegram_template'], 'r') as f:
                     template = Template(f.read())
             else:
-                template = Template(OPTIONS['telegram_template'])
+                template = Template(TELEGRAM_OPTIONS['telegram_template'])
         else:
             template = Template(DEFAULT_TMPL)
         try:
@@ -559,28 +574,46 @@ def main():
     }
 
     if config.has_section(MAIL_CONFIG_SECTION):
-        for opt in DEFAULT_OPTIONS:
-            # Convert the options to the expected type
-            OPTIONS[opt] = config_getters[type(DEFAULT_OPTIONS[opt])](MAIL_CONFIG_SECTION, opt)  # nopep8
+        for opt in DEFAULT_MAIL_OPTIONS:
+            if config.has_option(MAIL_CONFIG_SECTION, opt):
+                # Convert the options to the expected type
+                # print ( config_getters[str]("mail", 'smtp_host') )
+                MAIL_OPTIONS[opt] = config_getters[type(DEFAULT_MAIL_OPTIONS[opt])](MAIL_CONFIG_SECTION, opt)  # nopep8
+            else:
+                MAIL_OPTIONS[opt] = DEFAULT_MAIL_OPTIONS[opt]
+        #print (MAIL_OPTIONS['smtp_host'])
     else:
         LOG.debug('Alerta mail configuration section not found in configuration file\n')  # nopep8
-        OPTIONS = defopts.copy()
+        # OPTIONS = defopts.copy()
 
     if config.has_section(TELEGRAM_CONFIG_SECTION):
-        for opt in DEFAULT_OPTIONS:
+        for opt in DEFAULT_TELEGRAM_OPTIONS:
             # Convert the options to the expected type
-            OPTIONS[opt] = config_getters[type(DEFAULT_OPTIONS[opt])](TELEGRAM_CONFIG_SECTION, opt)  # nopep8
+            if config.has_option(TELEGRAM_CONFIG_SECTION, opt):
+                TELEGRAM_OPTIONS[opt] = config_getters[type(DEFAULT_TELEGRAM_OPTIONS[opt])](TELEGRAM_CONFIG_SECTION,
+                                                                                            opt)  # nopep8
+            else:
+                TELEGRAM_OPTIONS[opt] = DEFAULT_TELEGRAM_OPTIONS[opt]
     else:
         LOG.debug('Alerta telegram configuration section not found in configuration file\n')  # nopep8
-        OPTIONS = defopts.copy()
+        # OPTIONS = defopts.copy()
+    for opt in DEFAULT_OPTIONS:
+        # Convert the options to the expected type
+        if config.has_option("DEFAULT", opt):
+            OPTIONS[opt] = config_getters[type(DEFAULT_OPTIONS[opt])]("DEFAULT", opt)  # nopep8
+        else:
+            OPTIONS[opt] = DEFAULT_OPTIONS[opt]
 
+    #print(OPTIONS["endpoint"])
+    #print(TELEGRAM_OPTIONS['telegram_proxy_address'])
     OPTIONS['endpoint'] = os.environ.get('ALERTA_ENDPOINT') or OPTIONS['endpoint']  # nopep8
     OPTIONS['key'] = os.environ.get('ALERTA_API_KEY') or OPTIONS['key']
-    OPTIONS['smtp_username'] = os.environ.get('SMTP_USERNAME') or OPTIONS['smtp_username'] or OPTIONS['mail_from']
-    OPTIONS['smtp_password'] = os.environ.get('SMTP_PASSWORD') or OPTIONS['smtp_password']  # nopep8
-
-    if os.environ.get('DEBUG'):
-        OPTIONS['debug'] = True
+    # OPTIONS['smtp_username'] = os.environ.get('SMTP_USERNAME') or OPTIONS['smtp_username'] or OPTIONS['mail_from']
+    # OPTIONS['smtp_password'] = os.environ.get('SMTP_PASSWORD') or OPTIONS['smtp_password']  # nopep8
+    # print(OPTIONS['smtp_host'])
+    # print(MAIL_OPTIONS['smtp_host'])
+    # if os.environ.get('DEBUG'):
+    #    OPTIONS['debug'] = True
 
     if isinstance(config_file, list):
         group_rules = []
@@ -592,12 +625,6 @@ def main():
         OPTIONS['group_rules'] = group_rules
 
     # Registering action for SIGTERM signal handling
-    # for key in OPTIONS.keys():
-    #     try:
-    #       for value in OPTIONS[key]:
-    #         print (key, value)
-    #     except:
-    #         print ("hello")
     signal.signal(signal.SIGTERM, on_sigterm)
 
     try:
@@ -615,7 +642,8 @@ def main():
 
     with Connection(OPTIONS['amqp_url']) as conn:
         try:
-            consumer = FanoutConsumer(connection=conn)
+            a = config.get("DEFAULT", "hold_time")
+            consumer = FanoutConsumer(connection=conn, hold_time=config.get("DEFAULT", "hold_time"))
             consumer.run()
         except (SystemExit, KeyboardInterrupt):
             trigger.should_stop = True
