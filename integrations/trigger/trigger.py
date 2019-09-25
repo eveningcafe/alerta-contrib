@@ -89,6 +89,7 @@ DEFAULT_TELEGRAM_OPTIONS = {
     'telegram_proxy_address': None,
     'telegram_proxy_username': None,
     'telegram_proxy_password': None,
+    'telegram_template': None,
 
 }
 OPTIONS = {}
@@ -439,25 +440,22 @@ class Trigger(threading.Thread):
                    "can't handle your telegram template message."
         LOG.debug('Telegram: message=%s', text)
 
-        keyboard = {
-            'inline_keyboard': [
-                [
-                    {'text': 'ack', 'callback_data': '/ack ' + alert.id},
-                    {'text': 'close', 'callback_data': '/close ' + alert.id},
-                    {'text': 'blackout',
-                     'callback_data': '/blackout %s|%s|%s' % (alert.environment,
-                                                              alert.resource,
-                                                              alert.event)}
-                ]
-            ]
-        }
         for chartid in telegram_contacts:
             try:
-                response = self.bot.sendMessage(chartid,
-                                                text,
-                                                parse_mode='Markdown',
-                                                disable_notification=False,
-                                                reply_markup=keyboard)
+                print(chartid)
+                print(text)
+                # response = bot.sendMessage(chartid,
+                #                                 text,
+                #                                 parse_mode='Markdown',
+                #                                 disable_notification=False,
+                #                                 reply_markup=keyboard)
+                faketext = "asdas" \
+                           "f"
+                response = bot.sendMessage(chartid,
+                                           "",
+                                           parse_mode='Markdown',
+                                           disable_notification=False,
+                                           reply_markup=None)
             except telepot.exception.TelegramError as e:
                 raise RuntimeError("Telegram: ERROR - %s, description= %s, json=%s",
                                    e.error_code,

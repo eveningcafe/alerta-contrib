@@ -1,7 +1,7 @@
-Mailer Integration
+Trigger Integration
 ==================
 
-Send emails for alerts received by Alerta.
+Send emails, telegram, excute script for alerts received by Alerta.
 
 For help, join [![Gitter chat](https://badges.gitter.im/alerta/chat.png)](https://gitter.im/alerta/chat)
 
@@ -136,6 +136,7 @@ following format:
 ]
 ```
 
+``````
 ``field`` is a reference to the alert object, regex is a valid python
 regexp and contacts are a list of mails who will receive an e-mail if
 the regular expression matches.
