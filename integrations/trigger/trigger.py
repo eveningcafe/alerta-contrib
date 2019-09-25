@@ -264,7 +264,7 @@ class Trigger(threading.Thread):
         subject = self._subject_template.render(alert=alert)
         text = self._template_env.get_template(
             self._template_name).render(**template_vars)
-
+        # print (text)
         if (
                 MAIL_OPTIONS['email_type'] == 'html' and
                 self._template_name_html
@@ -434,7 +434,17 @@ class Trigger(threading.Thread):
         else:
             template = Template(DEFAULT_TMPL)
         try:
-            text = template.render(alert.__dict__)
+            template_vars = {
+                'alert': alert,
+                'dashboard_url': OPTIONS['dashboard_url'],
+                'program': os.path.basename(sys.argv[0]),
+                'hostname': platform.uname()[1],
+                'now': datetime.datetime.utcnow()
+            }
+            text = self._template_env.get_template(
+                self._template_name).render(**template_vars)
+            print(text)
+            #text = template.render(alert.__dict__)
         except UndefinedError:
             text = "Something bad has happened but also we " \
                    "can't handle your telegram template message."
@@ -442,8 +452,8 @@ class Trigger(threading.Thread):
 
         for chartid in telegram_contacts:
             try:
-                print(chartid)
-                print(text)
+                #print(chartid)
+                #print(text)
                 # response = bot.sendMessage(chartid,
                 #                                 text,
                 #                                 parse_mode='Markdown',
@@ -452,7 +462,7 @@ class Trigger(threading.Thread):
                 faketext = "asdas" \
                            "f"
                 response = bot.sendMessage(chartid,
-                                           "",
+                                           text,
                                            parse_mode='Markdown',
                                            disable_notification=False,
                                            reply_markup=None)
