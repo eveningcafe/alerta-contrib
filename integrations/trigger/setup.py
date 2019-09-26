@@ -21,7 +21,8 @@ setuptools.setup(
         'kombu',
         'redis',
         'telepot',
-        'jinja2'
+        'jinja2',
+        'telebot'
     ],
     include_package_data=True,
     zip_safe=False,

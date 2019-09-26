@@ -62,11 +62,6 @@ email_type = text
 [telegram]
 telegram_url = "https://api.telegram.org/bot" # url requires no additional configuration.
 telegram_token = "abcdefghi:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-[mail_alerta_users]
-# send mail to alerta user
-[mail_alerta_groups]
-# send mail to alerta users of group
-[exec]
 ```
 
 If you are using Google Gmail as the SMTP server. You will need to create
@@ -105,33 +100,27 @@ following format:
 ```
 [
     {
-        "name": "foo",
-        "fields": [
-            {"field": "resource", "regex": "db-w+"}
+        "rule_name": "foo",
+        "alert_fields": [
+            {"field": "resource", "regex": "db-w+"},
+            {"field": "environment", "regex": "Code"}
         ],
-        "mail": ["dba@lists.mycompany.com", "dev@lists.mycompany.com"],
-        "telegram": ["-12345678"],
-        "mail_alerta_users": ["hoanq"],
-        "mail_alerta_groups": ["backend_manager"],
-        "exec":[
-           {
-             "prog": "/path/to/executable_1",
-             "args": "executable arguments"
-           },
-           {
-             "prog": "/path/to/executable_2",
-             "args": "executable arguments"
-           }
-        ]
+        "mail": {
+          "to_addr": ["dba@lists.mycompany.com", "dev@lists.mycompany.com"],
+          "to_alerta_user": ["A","B"],
+          "to_alerta_group": ["AB","BC"]
+        },
+        "telegram": {
+          "chatid": ["-12345678"]
+        }
     },
     {
-        "name": "bar",
+        "rule_name": "bar",
         "fields": [
             {"field": "resource", "regex": "unknow-w+"},
-            {"field": "enviroment", "regex": "Code"}
+            {"field": "environment", "regex": "Code"}
         ],
-        "mail": [],
-        "exclude" : true
+        "mail": {}
     }
 ]
 ```

@@ -1,11 +1,26 @@
 [
     {
-        "name": "kafka",
-        "fields": [
+        "rule_name": "kafka",
+        "alert_fields": [
             {"field": "resource", "regex": "kafka_cluster"},
             {"field": "environment", "regex": "Code"}
         ],
-        "mail": ["hoanq13@viettel.com.vn"],
-        "telegram": ["-325641869"]
-   }
+        "mail": {
+          "to_addr": ["hoanq13@viettel.com.vn"],
+          "to_alerta_user": ["hoa","B"],
+          "to_alerta_group": ["AB","alert_hander"]
+        },
+        "telegram": {
+          "chatid": ["-325641869"]
+        }
+    },
+    {
+        "rule_name": "bar",
+        "alert_fields": [
+            {"field": "resource", "regex": "unknow-w+"},
+            {"field": "environment", "regex": "Code"}
+        ],
+        "mail": {}
+    }
 ]
+

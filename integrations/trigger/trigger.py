@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import platform
-import telepot
+import requests
 import re
 import signal
 import smtplib
@@ -19,6 +19,7 @@ from email.mime.text import MIMEText
 from functools import reduce
 
 import jinja2
+from alerta.exceptions import ApiError
 from jinja2 import Template, UndefinedError
 from alertaclient.api import Client
 from alertaclient.models.alert import Alert
@@ -58,6 +59,7 @@ DEFAULT_OPTIONS = {
     'amqp_queue_name': '',  # Name of the AMQP queue. Default is no name (default queue destination).
     # if use mongo, it can be : mongodb://localhost:27017/kombu , kombu is db name
     'amqp_queue_exclusive': True,  # Exclusive queues may only be consumed by the current connection.
+    'enable_triggers' : 'mail, telegram', # method can trigger
     'hold_time': 30,  # time keep messeage in queue before decide it is flapping
 }
 
@@ -74,23 +76,20 @@ DEFAULT_MAIL_OPTIONS = {
     'mail_to': [],  # devops@example.com, support@example.com
     'mail_localhost': None,  # fqdn to use in the HELO/EHLO command
     'mail_template': os.path.dirname(__file__) + os.sep + 'email.tmpl',
-    'mail_template_html': os.path.dirname(__file__) + os.sep + 'email.html.tmpl',  # nopep8
     'mail_subject': ('[{{ alert.status|capitalize }}] {{ alert.environment }}: '
                      '{{ alert.severity|capitalize }} {{ alert.event }} on '
                      '{{ alert.service|join(\',\') }} {{ alert.resource }}'),
 
     'skip_mta': False,
-    'email_type': 'text',  # options are: text, html
 }
 DEFAULT_TELEGRAM_OPTIONS = {
     # telegram
     'telegram_url': 'https://api.telegram.org/bot',
     'telegram_token': '',
-    'telegram_proxy_address': None,
-    'telegram_proxy_username': None,
+    'telegram_http_proxy': None,
+    'telegram_https_proxy': None,
     'telegram_proxy_password': None,
-    'telegram_template': None,
-
+    'telegram_template': os.path.dirname(__file__) + os.sep + 'telegram.tmpl',
 }
 OPTIONS = {}
 MAIL_OPTIONS = {}
@@ -99,18 +98,6 @@ TELEGRAM_OPTIONS = {}
 # HOLD_TIME = 30
 
 on_hold = dict()
-
-DEFAULT_TMPL = """
-{% if customer %}Customer: `{{customer}}` {% endif %}
-
-*[{{ status.capitalize() }}] {{ environment }} {{ severity.capitalize() }}*
-{{ event | replace("_","\_") }} {{ resource.capitalize() }}
-
-```
-{{ text }}
-```
-"""
-
 
 class FanoutConsumer(ConsumerMixin):
 
@@ -181,24 +168,48 @@ class FanoutConsumer(ConsumerMixin):
             on_hold[alertid] = (alert, time.time() + self.hold_time)
             message.ack()
 
+class Jinja():
+    # render jinja output about alert, input is path to file template
+    def __init__(self, template_file):
+        self._template_dir = os.path.dirname(
+            os.path.realpath(template_file))
+
+        self._template_name = os.path.basename(template_file)
+        self._subject_template = jinja2.Template(template_file)
+
+        self._template_env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(self._template_dir),
+            extensions=['jinja2.ext.autoescape'],
+            autoescape=True
+        )
+    def render(self, alert):
+        try:
+            template_vars = {
+                'alert': alert,
+                'dashboard_url': OPTIONS['dashboard_url'],
+                'program': os.path.basename(sys.argv[0]),
+                'hostname': platform.uname()[1],
+                'now': datetime.datetime.utcnow()
+            }
+            text = self._template_env.get_template(
+                self._template_name).render(**template_vars)
+        except UndefinedError:
+            text = "Something bad has happened but also we " \
+                   "can't handle your template message."
+        LOG.debug('message=%s', text)
+        return text
+
+
 
 class Trigger(threading.Thread):
 
     def __init__(self):
 
         self.should_stop = False
-        self._template_dir = os.path.dirname(
-            os.path.realpath(MAIL_OPTIONS['mail_template']))
-        self._template_name = os.path.basename(MAIL_OPTIONS['mail_template'])
-        self._subject_template = jinja2.Template(MAIL_OPTIONS['mail_subject'])
-        self._template_env = jinja2.Environment(
-            loader=jinja2.FileSystemLoader(self._template_dir),
-            extensions=['jinja2.ext.autoescape'],
-            autoescape=True
-        )
-        if MAIL_OPTIONS['mail_template_html']:
-            self._template_name_html = os.path.basename(
-                MAIL_OPTIONS['mail_template_html'])
+        if 'mail' in OPTIONS['enable_triggers']:
+            self.mail_hander = Jinja(MAIL_OPTIONS['mail_template'])
+        if 'telegram' in OPTIONS['enable_triggers']:
+            self.telegram_hander = Jinja(TELEGRAM_OPTIONS['telegram_template'])
 
         super(Trigger, self).__init__()
 
@@ -213,6 +224,7 @@ class Trigger(threading.Thread):
                     (alert, hold_time) = on_hold[alertid]
                 except KeyError:
                     continue
+
                 if time.time() > hold_time:
                     self.diagnose(alert)
                     try:
@@ -222,7 +234,7 @@ class Trigger(threading.Thread):
 
             if keep_alive >= 10:
                 try:
-                    origin = '{}/{}'.format('alerta-trigger', OPTIONS['smtp_host'])
+                    origin = '{}'.format('alerta-trigger')
                     api.heartbeat(origin, tags=[__version__])
                 except Exception as e:
                     time.sleep(5)
@@ -252,28 +264,9 @@ class Trigger(threading.Thread):
         return False
 
     def _send_mail(self, mail_contacts, alert):
-        template_vars = {
-            'alert': alert,
-            'mail_to': mail_contacts,
-            'dashboard_url': OPTIONS['dashboard_url'],
-            'program': os.path.basename(sys.argv[0]),
-            'hostname': platform.uname()[1],
-            'now': datetime.datetime.utcnow()
-        }
-
-        subject = self._subject_template.render(alert=alert)
-        text = self._template_env.get_template(
-            self._template_name).render(**template_vars)
-        # print (text)
-        if (
-                MAIL_OPTIONS['email_type'] == 'html' and
-                self._template_name_html
-        ):
-            html = self._template_env.get_template(
-                self._template_name_html).render(**template_vars)
-        else:
-            html = None
-
+        subject_template = jinja2.Template(MAIL_OPTIONS['mail_subject'])
+        subject = subject_template.render(alert=alert)
+        text = self.mail_hander.render(alert)
         msg = MIMEMultipart('alternative')
         msg['Subject'] = Header(subject, 'utf-8').encode()
         msg['From'] = MAIL_OPTIONS['mail_from']
@@ -283,9 +276,6 @@ class Trigger(threading.Thread):
         # by default we are going to assume that the email is going to be text
         msg_text = MIMEText(text, 'plain', 'utf-8')
         msg.attach(msg_text)
-        if html:
-            msg_html = MIMEText(html, 'html', 'utf-8')
-            msg.attach(msg_html)
 
         try:
             self._send_email_message(msg, mail_contacts)
@@ -315,10 +305,10 @@ class Trigger(threading.Thread):
         if 'group_rules' in OPTIONS and len(OPTIONS['group_rules']) > 0:
             LOG.debug('Checking %d group rules' % len(OPTIONS['group_rules']))
             for rule in OPTIONS['group_rules']:
-                LOG.info('Evaluating rule %s', rule['name'])
+                LOG.info('Evaluating rule %s', rule['rule_name'])
                 is_matching = True
-                for field in rule['fields']:
-                    LOG.debug('Evaluating rule field %s', field)
+                for field in rule['alert_fields']:
+                    LOG.debug('Evaluating rule with alert field %s', field)
                     value = getattr(alert, field['field'], None)
                     if value is None:
                         LOG.warning('Alert has no attribute %s',
@@ -331,25 +321,64 @@ class Trigger(threading.Thread):
                 if is_matching:
                     # Add up any new contacts , send mail. telegram,...
                     if 'mail' in rule:
-                        new_mail_contacts = [x.strip() for x in rule['mail']
-                                             if x.strip() not in mail_contacts]
-                        if len(new_mail_contacts) > 0:
-                            LOG.debug('Extending mail contact to include %s' % (
-                                new_mail_contacts))
-                            mail_contacts.extend(new_mail_contacts)
+                        if 'to_addr' in rule['mail']:
+                            new_mail_contacts = [x.strip() for x in rule['mail']['to_addr']
+                                                 if x.strip() not in mail_contacts]
+                            if len(new_mail_contacts) > 0:
+                                LOG.debug('Extending mail contact to include %s' % (
+                                    new_mail_contacts))
+                                mail_contacts.extend(new_mail_contacts)
+                        if 'to_alerta_user' in rule['mail']:
+                            for user in rule['mail']['to_alerta_user']:
+                                try:
+                                    new_mail_contact = self._get_alerta_user_mail(user)
+                                    LOG.debug('Extending mail contact to include %s' % (
+                                        new_mail_contact))
+                                    if new_mail_contact not in mail_contacts:
+                                        mail_contacts.append(new_mail_contact)
+                                except Exception as e:
+                                    LOG.warning("can't find user's mail of %s :  %s", user, e)
+
+                        if 'to_addr' in rule['mail']:
+                            for group in rule['mail']['to_alerta_group']:
+                                try:
+                                    users = self._get_alerta_group_users(group)
+                                    for user in users:
+                                        try:
+                                            new_mail_contact = self._get_alerta_user_mail(user)
+                                            if new_mail_contact not in mail_contacts:
+                                                LOG.debug('Extending mail contact to include %s' % (
+                                                    new_mail_contact))
+                                                mail_contacts.append(new_mail_contact)
+
+
+                                        except Exception as e:
+                                            LOG.warning("can't find user's mail: %s, %s", user, e)
+                                except Exception as e:
+                                    LOG.warning("can't find group: %s, %s", group, e)
+
+
                     if 'telegram' in rule:
-                        new_telegram_contacts = [x.strip() for x in rule['telegram']
-                                                 if x.strip() not in telegram_contacts]
-                        if len(new_telegram_contacts) > 0:
-                            LOG.debug('Extending telegram contact to include %s' % (
-                                new_telegram_contacts))
-                            telegram_contacts.extend(new_telegram_contacts)
+                        if 'chatid' in rule['telegram']:
+                            new_telegram_contacts = [x.strip() for x in rule['telegram']['chatid']
+                                                     if x.strip() not in telegram_contacts]
+                            if len(new_telegram_contacts) > 0:
+                                LOG.debug('Extending telegram contact to include %s' % (
+                                    new_telegram_contacts))
+                                telegram_contacts.extend(new_telegram_contacts)
 
         # Don't loose time (and try to send ) if there is no contact...
         if len(mail_contacts) > 0:
-            self._send_mail(mail_contacts, alert)
+            try:
+               self._send_mail(mail_contacts, alert)
+            except Exception as e:
+               LOG.error("Send mail: ERROR - %s", e)
+
         if len(telegram_contacts) > 0:
-            self._send_telegram(telegram_contacts, alert)
+            try:
+               self._send_telegram(telegram_contacts, alert)
+            except Exception as e:
+               LOG.error("Send telegram: ERROR - %s", e)
 
     def _send_email_message(self, msg, contacts):
         if MAIL_OPTIONS['skip_mta'] and DNS_RESOLVER_AVAILABLE:
@@ -384,7 +413,6 @@ class Trigger(threading.Thread):
 
         else:
             if MAIL_OPTIONS['smtp_use_ssl']:
-                # print(MAIL_OPTIONS['smtp_host'])
                 mx = smtplib.SMTP_SSL(MAIL_OPTIONS['smtp_host'],
                                       MAIL_OPTIONS['smtp_port'],
                                       local_hostname=MAIL_OPTIONS['mail_localhost'],
@@ -411,70 +439,57 @@ class Trigger(threading.Thread):
             mx.close()
 
     def _send_telegram(self, telegram_contacts, alert):
-        if 'telegram_proxy_address' in TELEGRAM_OPTIONS :
-                if TELEGRAM_OPTIONS['telegram_proxy_username'] is not None and TELEGRAM_OPTIONS['telegram_proxy_password'] is not None:
-                    telepot.api.set_proxy(
-                        TELEGRAM_OPTIONS['telegram_proxy_address'],
-                        (TELEGRAM_OPTIONS['telegram_proxy_username'], TELEGRAM_OPTIONS['telegram_proxy_password']))
-                    LOG.debug('Telegram: using proxy %s', TELEGRAM_OPTIONS['telegram_proxy_address'])
-                elif 'telegram_proxy_address' in TELEGRAM_OPTIONS:
-                    telepot.api.set_proxy(TELEGRAM_OPTIONS['telegram_proxy_address'])
-                    LOG.debug('Telegram: using proxy %s', TELEGRAM_OPTIONS['telegram_proxy_address'])
-
-
-        bot = telepot.Bot(TELEGRAM_OPTIONS['telegram_token'])
-        LOG.debug('Telegram: %s', bot.getMe())
-
-        if TELEGRAM_OPTIONS['telegram_template']:
-            if os.path.exists(TELEGRAM_OPTIONS['telegram_template']):
-                with open(TELEGRAM_OPTIONS['telegram_template'], 'r') as f:
-                    template = Template(f.read())
-            else:
-                template = Template(TELEGRAM_OPTIONS['telegram_template'])
-        else:
-            template = Template(DEFAULT_TMPL)
         try:
-            template_vars = {
-                'alert': alert,
-                'dashboard_url': OPTIONS['dashboard_url'],
-                'program': os.path.basename(sys.argv[0]),
-                'hostname': platform.uname()[1],
-                'now': datetime.datetime.utcnow()
-            }
-            text = self._template_env.get_template(
-                self._template_name).render(**template_vars)
-            print(text)
-            #text = template.render(alert.__dict__)
+            text = self.telegram_hander.render(alert)
         except UndefinedError:
             text = "Something bad has happened but also we " \
                    "can't handle your telegram template message."
-        LOG.debug('Telegram: message=%s', text)
 
         for chartid in telegram_contacts:
             try:
-                #print(chartid)
-                #print(text)
-                # response = bot.sendMessage(chartid,
-                #                                 text,
-                #                                 parse_mode='Markdown',
-                #                                 disable_notification=False,
-                #                                 reply_markup=keyboard)
-                faketext = "asdas" \
-                           "f"
-                response = bot.sendMessage(chartid,
-                                           text,
-                                           parse_mode='Markdown',
-                                           disable_notification=False,
-                                           reply_markup=None)
-            except telepot.exception.TelegramError as e:
-                raise RuntimeError("Telegram: ERROR - %s, description= %s, json=%s",
-                                   e.error_code,
-                                   e.description,
-                                   e.json)
+                send_text = TELEGRAM_OPTIONS['telegram_url'] + TELEGRAM_OPTIONS['telegram_token'] + '/sendMessage?chat_id=' + chartid + '&parse_mode=Markdown&text=' + text
+                proxies = {
+                    "http": os.environ.get('http_proxy') or TELEGRAM_OPTIONS['telegram_http_proxy'],
+                    "https": os.environ.get('http_proxy') or TELEGRAM_OPTIONS['telegram_https_proxy'],
+                }
+                response = requests.get(send_text,proxies=proxies)
+                LOG.debug("response: %s",response.json())
             except Exception as e:
                 raise RuntimeError("Telegram: ERROR - %s", e)
 
-            LOG.debug('Telegram: %s', response)
+    def _get_alerta_user_mail(self, user):
+        url = OPTIONS['endpoint']+'/users'+'?name=' + user
+        headers = {'Authorization': 'Key '+OPTIONS['key']}
+        response =  requests.get(url,headers = headers )
+        if response.status_code != 200:
+            # This means something went wrong.
+            raise ApiError('GET /users/ {}'.format(response.status_code))
+        data = response.json()
+        if not data['users']:
+            raise Exception('Failed to find user' + user)  # nopep8
+        return data['users'][0]['email']
+
+    def _get_alerta_group_users(self, group):
+        # find group
+        group_url = OPTIONS['endpoint'] + '/groups' + '?name=' + group
+        headers = {'Authorization': 'Key ' + OPTIONS['key']}
+        response = requests.get(group_url, headers=headers)
+        if response.status_code != 200:
+            # This means something went wrong.
+            raise ApiError('GET /groups/ {}'.format(response.status_code))
+        data_group = response.json()
+        if not data_group['groups']:
+            raise Exception('Failed to find group' + group)  # nopep8
+
+        # find user of that group
+        users_url = data_group['groups'][0]['href'] + '/users'
+        # user_url =  http://localhost/api/group/ed4b7060-897e-41dd-830d-a4604eb19288/users
+        response = requests.get(users_url, headers=headers)
+        data_users = response.json()["users"]
+        users = []
+        for u in data_users:
+            users.append(u['name'])
+        return users
 
 
 def validate_rules(rules):
@@ -491,17 +506,17 @@ def validate_rules(rules):
             continue
         valid = True
         # TODO: This could be optimized to use sets instead
-        for key in ['name', 'fields']:
+        for key in ['rule_name', 'alert_fields']:
             if key not in rule:
                 LOG.warning('Invalid rule %s, must have %s', rule, key)
                 valid = False
                 break
         if valid is False:
             continue
-        if not isinstance(rule['fields'], list) or len(rule['fields']) == 0:
-            LOG.warning('Rule fields must be a list and not empty')
+        if not isinstance(rule['alert_fields'], list) or len(rule['alert_fields']) == 0:
+            LOG.warning('Alert fields must be a list and not empty')
             continue
-        for field in rule['fields']:
+        for field in rule['alert_fields']:
             for key in ['regex', 'field']:
                 if key not in field:
                     LOG.warning('Invalid rule %s, must have %s on fields',
@@ -585,11 +600,9 @@ def main():
         for opt in DEFAULT_MAIL_OPTIONS:
             if config.has_option(MAIL_CONFIG_SECTION, opt):
                 # Convert the options to the expected type
-                # print ( config_getters[str]("mail", 'smtp_host') )
                 MAIL_OPTIONS[opt] = config_getters[type(DEFAULT_MAIL_OPTIONS[opt])](MAIL_CONFIG_SECTION, opt)  # nopep8
             else:
                 MAIL_OPTIONS[opt] = DEFAULT_MAIL_OPTIONS[opt]
-        #print (MAIL_OPTIONS['smtp_host'])
     else:
         LOG.debug('Alerta mail configuration section not found in configuration file\n')  # nopep8
         # OPTIONS = defopts.copy()
@@ -612,16 +625,8 @@ def main():
         else:
             OPTIONS[opt] = DEFAULT_OPTIONS[opt]
 
-    #print(OPTIONS["endpoint"])
-    #print(TELEGRAM_OPTIONS['telegram_proxy_address'])
     OPTIONS['endpoint'] = os.environ.get('ALERTA_ENDPOINT') or OPTIONS['endpoint']  # nopep8
     OPTIONS['key'] = os.environ.get('ALERTA_API_KEY') or OPTIONS['key']
-    # OPTIONS['smtp_username'] = os.environ.get('SMTP_USERNAME') or OPTIONS['smtp_username'] or OPTIONS['mail_from']
-    # OPTIONS['smtp_password'] = os.environ.get('SMTP_PASSWORD') or OPTIONS['smtp_password']  # nopep8
-    # print(OPTIONS['smtp_host'])
-    # print(MAIL_OPTIONS['smtp_host'])
-    # if os.environ.get('DEBUG'):
-    #    OPTIONS['debug'] = True
 
     if isinstance(config_file, list):
         group_rules = []
@@ -650,8 +655,7 @@ def main():
 
     with Connection(OPTIONS['amqp_url']) as conn:
         try:
-            a = config.get("DEFAULT", "hold_time")
-            consumer = FanoutConsumer(connection=conn, hold_time=config.get("DEFAULT", "hold_time"))
+            consumer = FanoutConsumer(connection=conn, hold_time=OPTIONS['hold_time'])
             consumer.run()
         except (SystemExit, KeyboardInterrupt):
             trigger.should_stop = True
