@@ -15,13 +15,14 @@ import time
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from functools import reduce
 
 import jinja2
 from alertaclient.api import Client
 from alertaclient.models.alert import Alert
 from kombu import Connection, Exchange, Queue
 from kombu.mixins import ConsumerMixin
-
+from pyparsing import unicode
 __version__ = '5.2.0'
 
 DNS_RESOLVER_AVAILABLE = False

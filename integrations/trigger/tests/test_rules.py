@@ -15,38 +15,7 @@ def test_rules_dont_exist():
         system_os.path.exists.return_value = False
         res = trigger.parse_group_rules('config_file')
         system_os.path.exists.called_once_with('confile_file')
-        assert res is None
-
-def test_rules_parsing_indev():
-    '''
-    Test the rules file is properly read
-    '''
-    with patch.multiple(trigger, os=DEFAULT, open=DEFAULT,
-                        json=DEFAULT, validate_rules=DEFAULT) as mocks:
-        mocks['os'].path.exists.return_value = True
-        mocks['os'].walk().__iter__\
-            .return_value = [('/', None,
-                              ['cantopen.json', 'invalid.json', 'valid.json'])]
-        invalid_file = MagicMock()
-        valid_file = MagicMock()
-        mocks['open'].side_effect = [IOError, invalid_file, valid_file]
-        # write something here
-        doc = [{'notify': {'fields': []}}]
-
-        mocks['json'].load.side_effect = [TypeError, doc]
-        mocks['validate_rules'].return_value = doc
-        res = trigger.parse_group_rules('config_file')
-
-        # Assert that we checked for folder existence
-        mocks['os'].path.exists.called_once_with('confile_file')
-        # Check that validation was called for valid file
-        mocks['validate_rules'].assert_called_once_with(doc)
-def test_telegram():
-    with patch.dict(trigger.TELEGRAM_OPTIONS, trigger.DEFAULT_TELEGRAM_OPTIONS):
-        t = trigger.Trigger()
-        t._send_telegram('iasasdf', 'fasd')
-        print("cho")
-
+        assert len(res) is 0
 
 
 def test_rules_parsing():
@@ -56,7 +25,7 @@ def test_rules_parsing():
     with patch.multiple(trigger, os=DEFAULT, open=DEFAULT,
                         json=DEFAULT, validate_rules=DEFAULT) as mocks:
         mocks['os'].path.exists.return_value = True
-        mocks['os'].walk().__iter__\
+        mocks['os'].walk().__iter__ \
             .return_value = [('/', None,
                               ['cantopen.json', 'invalid.json', 'valid.json'])]
         invalid_file = MagicMock()
@@ -88,39 +57,34 @@ TESTDOCS = [
     ({}, False),
     ([], True),
     ([
-        {"name": "invalid_no_fields",
-         "contacts": []}
-    ], False),
+         {"rule_name": "invalid_no_fields", }
+     ], False),
     ([
-        {"name": "invalid_empty_fields",
-         "fields": [],
-         "contacts": []}
-    ], False),
+         {"rule_name": "invalid_empty_fields",
+          "alert_fields": [],
+          }
+     ], False),
     ([
-        {"name": "invalid_no_contacts",
-         "fields": [{"field": "resource", "regex": r"\d{4}"}]}
-    ], False),
+         {"rule_name": "invalid_no_field_on_fields",
+          "alert_fields": [{"regex": r"\d{4}"}],
+          }
+     ], False),
     ([
-        {"name": "invalid_no_field_on_fields",
-         "fields": [{"regex": r"\d{4}"}],
-         "contacts": []}
-    ], False),
+         {"rule_name": "invalid_fields_not_list",
+          "alert_fields": {"regex": r"\d{4}"},
+          }
+     ], False),
     ([
-        {"name": "invalid_fields_not_list",
-         "fields": {"regex": r"\d{4}"},
-         "contacts": []}
-    ], False),
+         {"rule_name": "invalid_no_fields_regex",
+          "alert_fields": [{"field": "test"}],
+          }
+     ], False),
     ([
-        {"name": "invalid_no_fields_regex",
-         "fields": [{"field": "test"}],
-         "contacts": []}
-    ], False),
-    ([
-        {"name": "invalid_no_fields_regex",
-         "fields": [{"field": "tags", "regex": "atag"}],
-         "exclude": True,
-         "contacts": []}
-    ], True),
+         {"rule_name": "invalid_no_fields_regex",
+          "alert_fields": [{"field": "tags", "regex": "atag"}],
+          "exclude": True,
+          }
+     ], True),
 ]
 
 
@@ -137,30 +101,39 @@ def test_rules_validation(doc, is_valid):
 
 
 RULES_DATA = [
-    ({'resource': 'server-1234'}, [], []),
-    ({'resource': '1234'},
-     [{"name": "Test1",
-       "fields": [{"field": "resource", "regex": r"(\w.*)?\d{4}"}],
-       "contacts": ["test@example.com"]}],
-     ['test@example.com'])
+    ({'resource': '1234', 'event': 'down'},
+     [{"rule_name": "Test1",
+       "alert_fields": [{"field": "resource", "regex": r"(\w.*)?\d{4}"}],
+       "mail": {
+           "to_addr": ["test@example.com"]
+       },
+       "telegram": {
+           "chatid": ["-123456"]
+       }
+       }
+      ],
+     ['test@example.com'],
+     ['-123456'])
 ]
 
 
-@pytest.mark.parametrize('alert_spec, input_rules, expected_contacts',
+@pytest.mark.parametrize('alert_spec, input_rules, expected_mail_contacts, expected_telegram_contacts',
                          RULES_DATA)
-def test_rules_evaluation(alert_spec, input_rules, expected_contacts):
+def test_rules_evaluation(alert_spec, input_rules, expected_mail_contacts, expected_telegram_contacts):
     '''
     Test that rules are properly evaluated
     '''
     with patch.dict(trigger.OPTIONS, trigger.DEFAULT_OPTIONS):
-        trigger.OPTIONS['mail_to'] = []
-        trigger.OPTIONS['group_rules'] = input_rules
-        mail_sender = trigger.MailSender()
-        with patch.object(mail_sender, '_send_email_message') as _sem:
-            alert = Alert.parse(alert_spec)
-            _, emailed_contacts = mail_sender.send_email(alert)
-            assert _sem.call_count == 1
-            assert emailed_contacts == expected_contacts
+        with patch.dict(trigger.MAIL_OPTIONS, trigger.DEFAULT_MAIL_OPTIONS):
+            with patch.dict(trigger.TELEGRAM_OPTIONS, trigger.DEFAULT_TELEGRAM_OPTIONS):
+                trigger.OPTIONS['group_rules'] = input_rules
+                mail_sender = trigger.Trigger()
+                with patch.object(mail_sender, '_send_email_message') as _sem:
+                    alert = Alert.parse(alert_spec)
+                    emailed_contacts, telegram_contacts = mail_sender.diagnose(alert)
+                    assert _sem.call_count == 1
+                    assert emailed_contacts == expected_mail_contacts
+                    assert telegram_contacts == expected_telegram_contacts
 
 
 def test_rule_matches_list():
@@ -168,15 +141,17 @@ def test_rule_matches_list():
     Test regex matching is working properly
     for a list
     '''
-    # Mock options to instantiate mailer
+    # Mock options to instantiate trigger
     with patch.dict(trigger.OPTIONS, trigger.DEFAULT_OPTIONS):
-        mail_sender = trigger.Trigger()
-        with patch.object(trigger, 're') as regex:
-            regex.match.side_effect = [MagicMock(), None]
-            assert mail_sender._rule_matches('regex', ['item1']) is True
-            regex.match.assert_called_with('regex', 'item1')
-            assert mail_sender._rule_matches('regex', ['item2']) is False 
-            regex.match.assert_called_with('regex', 'item2')
+        with patch.dict(trigger.MAIL_OPTIONS, trigger.DEFAULT_MAIL_OPTIONS):
+            with patch.dict(trigger.TELEGRAM_OPTIONS, trigger.DEFAULT_TELEGRAM_OPTIONS):
+                my_trigger = trigger.Trigger()
+                with patch.object(trigger, 're') as regex:
+                    regex.match.side_effect = [MagicMock(), None]
+                    assert my_trigger._rule_matches('regex', ['item1']) is True
+                    regex.match.assert_called_with('regex', 'item1')
+                    assert my_trigger._rule_matches('regex', ['item2']) is False
+                    regex.match.assert_called_with('regex', 'item2')
 
 
 def test_rule_matches_string():
@@ -186,11 +161,12 @@ def test_rule_matches_string():
     '''
     # Mock options to instantiate mailer
     with patch.dict(trigger.OPTIONS, trigger.DEFAULT_OPTIONS):
-        mail_sender = trigger.MailSender()
-        with patch.object(trigger, 're') as regex:
-            regex.search.side_effect = [MagicMock(), None]
-            assert mail_sender._rule_matches('regex', 'value1') is True
-            regex.search.assert_called_with('regex', 'value1')
-            assert mail_sender._rule_matches('regex', 'value2') is False
-            regex.search.assert_called_with('regex', 'value2')
-
+        with patch.dict(trigger.MAIL_OPTIONS, trigger.DEFAULT_MAIL_OPTIONS):
+            with patch.dict(trigger.TELEGRAM_OPTIONS, trigger.DEFAULT_TELEGRAM_OPTIONS):
+                my_trigger = trigger.Trigger()
+                with patch.object(trigger, 're') as regex:
+                    regex.search.side_effect = [MagicMock(), None]
+                    assert my_trigger._rule_matches('regex', 'value1') is True
+                    regex.search.assert_called_with('regex', 'value1')
+                    assert my_trigger._rule_matches('regex', 'value2') is False
+                    regex.search.assert_called_with('regex', 'value2')

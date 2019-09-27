@@ -339,7 +339,7 @@ class Trigger(threading.Thread):
                                 except Exception as e:
                                     LOG.warning("can't find user's mail of %s :  %s", user, e)
 
-                        if 'to_addr' in rule['mail']:
+                        if 'to_alerta_group' in rule['mail']:
                             for group in rule['mail']['to_alerta_group']:
                                 try:
                                     users = self._get_alerta_group_users(group)
@@ -379,6 +379,7 @@ class Trigger(threading.Thread):
                self._send_telegram(telegram_contacts, alert)
             except Exception as e:
                LOG.error("Send telegram: ERROR - %s", e)
+        return mail_contacts, telegram_contacts
 
     def _send_email_message(self, msg, contacts):
         if MAIL_OPTIONS['skip_mta'] and DNS_RESOLVER_AVAILABLE:

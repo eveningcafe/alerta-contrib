@@ -15,7 +15,7 @@ def test_rules_dont_exist():
         system_os.path.exists.return_value = False
         res = mailer.parse_group_rules('config_file')
         system_os.path.exists.called_once_with('confile_file')
-        assert res is None
+        assert len(res) is 0
 
 
 def test_rules_parsing():
@@ -106,8 +106,7 @@ def test_rules_validation(doc, is_valid):
 
 
 RULES_DATA = [
-    ({'resource': 'server-1234'}, [], []),
-    ({'resource': '1234'},
+    ({'resource': '1234', 'event': 'down'},
      [{"name": "Test1",
        "fields": [{"field": "resource", "regex": r"(\w.*)?\d{4}"}],
        "contacts": ["test@example.com"]}],
